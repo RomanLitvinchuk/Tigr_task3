@@ -16,8 +16,9 @@ struct Parameters {
     int n;                // Количество фирм
     double rho;           // Коэф. дисконтирования [0; 1]
     int T;                // Терминальный момент времени
-    double delta;         // Коэф. сохранения издержек [0; 1]
-    double theta; // Ликвидационная стоимость (max рыночная стоимость)
+    double delta;         // Коэф. сохранения издержек
+    double eta; // Ликвидационная стоимость (max рыночная стоимость)
+    vector<double> eta_vec;
     double epsilon;       // Параметр (цена усилий)
     double alpha;         // Эффективность инвестиций
     double beta;          // Эффективность сотрудничества
@@ -35,7 +36,6 @@ struct GameState {
     vector<vector<double>> profit; // Прибыль
     vector<double> total_discounted_profit; // Суммарная дисконтированная прибыль
 
-    // Матрица смежности [T+1][n][n]
     vector<vector<vector<int>>> g;
 
     void resize(int n, int T) {
@@ -44,7 +44,7 @@ struct GameState {
         y.assign(n, vector<double>(T + 1, 0.0));
         phi.assign(n, vector<double>(T + 1, 0.0));
         profit.assign(n, vector<double>(T + 1, 0.0));
-        total_discounted_profit.assign(n, 0.0); // Новый вектор
+        total_discounted_profit.assign(n, 0.0); 
         g.assign(T + 1, vector<vector<int>>(n, vector<int>(n, 0)));
     }
 };
@@ -64,18 +64,22 @@ void solveGame(const Parameters& params, GameState& state) {
         // 1. Расчет производства u(t) (t < T)
         for (int t = 0; t < T; ++t) {
             double sum_c = 0.0;
-            for (int j = 0; j < n; ++j) sum_c += state.c[j][t];
 
             for (int i = 0; i < n; ++i) {
-                double val = (params.p - (n + 1) * state.c[i][t] + sum_c) / (n + 1);
-                state.u[i][t] = max(0.0, val);
+                for (int j = 0; j < n; ++j) {
+                    sum_c += state.c[j][t];
+                    //double val = (params.p - (n + 1) * state.c[i][t] + sum_c) / (n + 1);
+                    //state.u[i][t] = max(0.0, val);
+                }
+                state.u[i][t] = (params.p - (n + 1) * state.c[i][t] + sum_c) / (n + 1);
+                state.u[i][t] = max(0.0, state.u[i][t]);
             }
         }
         for (int i = 0; i < n; ++i) state.u[i][T] = 0.0;
 
-        // 2. Расчет сопряженной переменной phi(t) (Обратный ход)
+        // 2. Расчет сопряженной переменной phi(t) 
         for (int i = 0; i < n; ++i) {
-            state.phi[i][T] = -pow(params.rho, T) * params.theta;
+            state.phi[i][T] = -pow(params.rho, T) * params.eta;
 
             for (int t = T - 1; t >= 0; --t) {
                 double next_phi = -pow(params.rho, t) * state.u[i][t] + params.delta * state.phi[i][t + 1];
@@ -84,7 +88,7 @@ void solveGame(const Parameters& params, GameState& state) {
             }
         }
 
-        // 3. Расчет инвестиций y(t) и матрицы смежности g(t) (t < T)
+        // Расчет инвестиций y(t) и матрицы смежности g(t) (t < T)
         for (int t = 0; t < T; ++t) {
             for (int i = 0; i < n; ++i) {
                 double rho_t = pow(params.rho, t);
@@ -116,7 +120,7 @@ void solveGame(const Parameters& params, GameState& state) {
             for (int j = 0; j < n; ++j) state.g[T][i][j] = 0;
         }
 
-        // 4. Расчет динамики издержек c(t+1) (Прямой ход)
+        // 4. Расчет динамики издержек c(t+1)
         for (int t = 0; t < T; ++t) {
             for (int i = 0; i < n; ++i) {
                 double sum_interaction = 0.0;
@@ -142,41 +146,26 @@ void solveGame(const Parameters& params, GameState& state) {
 
     // Расчет мгновенной и суммарной дисконтированной прибыли
     for (int i = 0; i < n; ++i) {
-        state.total_discounted_profit[i] = 0.0; // Сброс
+        state.total_discounted_profit[i] = 0.0; 
     }
-
-    for (int t = 0; t <= T; ++t) {
-        double total_u = 0;
-        for (int k = 0; k < n; ++k) total_u += state.u[k][t];
-        double price = max(0.0, params.p - total_u);
-
+    for (int t = 0; t < T; ++t) {
+        double coop_wastes = 0.0;
+        double total_uj = 0.0;
         for (int i = 0; i < n; ++i) {
-            double revenue = price * state.u[i][t];
-            double prod_cost = state.c[i][t] * state.u[i][t];
-            double inv_cost = 0.5 * params.epsilon * state.y[i][t] * state.y[i][t];
-            double coop_cost = 0;
-
-            if (t < T) {
-                for (int j = 0; j < n; ++j) {
-                    if (i != j && state.g[t][i][j] && state.g[t][j][i]) {
-                        coop_cost += params.pi[i][j];
-                    }
-                }
+            for (int j = 0; j < n; ++j) 
+            {
+                if (i != j) { coop_wastes += params.pi[i][j] * state.g[t][i][j] * state.g[t][j][i]; }
+                total_uj += state.u[j][t];
             }
-
-            double instant_profit = revenue - prod_cost - inv_cost - coop_cost;
-            state.profit[i][t] = instant_profit;
-
-            // Накопление суммарной дисконтированной прибыли
-            state.total_discounted_profit[i] += pow(params.rho, t) * instant_profit;
+            state.total_discounted_profit[i] += pow(params.rho, t) * ((params.p - state.c[i][t] - total_uj) * state.u[i][t] - params.epsilon / 2 * pow(state.y[i][t], 2) - coop_wastes) + pow(params.rho, T) * (params.eta_vec[i] - params.eta * state.c[i][T]);
         }
+
     }
 }
 
 void printResults(const Parameters& params, const GameState& state) {
     cout << fixed << setprecision(4);
 
-    // Вывод таблиц
     for (int i = 0; i < params.n; ++i) {
         cout << "\n==========================================" << endl;
         cout << "Table for Firm " << (i + 1) << ":" << endl;
@@ -198,7 +187,6 @@ void printResults(const Parameters& params, const GameState& state) {
         for (int t = 0; t <= params.T; ++t) cout << setw(10) << state.profit[i][t];
         cout << endl;
 
-        // --- НОВЫЙ ВЫВОД СУММАРНОЙ ПРИБЫЛИ ---
         cout << "\n>>> Total Discounted Profit: " << state.total_discounted_profit[i] << endl;
     }
 
@@ -220,10 +208,10 @@ void printResults(const Parameters& params, const GameState& state) {
     }
 }
 
-int main() {
+int main() 
+{
     Parameters params;
 
-    // Ввод данных с подсказками
     cout << "Enter p (max price of product): ";
     cin >> params.p;
 
@@ -239,14 +227,22 @@ int main() {
     cout << "Enter delta (cost retention coeff [0; 1]): ";
     cin >> params.delta;
 
-    cout << "Enter theta (liquidity coeff) for " << params.n << " firms:" << endl;
-    cin >> params.theta;
+    cout << "Enter eta (liquidity coeff) for " << params.n << " firms:" << endl;
+    cin >> params.eta;
 
+    cout << "Enter eta_i for each firm:" << endl;
+    params.eta_vec.resize(params.n);
+    for (int i = 0; i < params.n; ++i)
+    {
+        cout << "  eta[" << i + 1 << "]:" << endl;
+        cin >> params.eta_vec[i];
+    }
     cout << "Enter epsilon (cost param), alpha (inv eff), beta (coop eff), gamma (non-coop eff): " << endl;
     cout << "Format: eps alpha beta gamma" << endl;
     cin >> params.epsilon >> params.alpha >> params.beta >> params.gamma;
 
     cout << "Enter initial costs c(0) for " << params.n << " firms:" << endl;
+
     params.c0.resize(params.n);
     for (int i = 0; i < params.n; ++i) {
         cout << "  c_" << i + 1 << "(0): ";
